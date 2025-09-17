@@ -1,0 +1,107 @@
+const express = require("express");
+const app = express();
+const server = require("http").createServer(app);
+const io = require("socket.io")(server);
+
+app.use(express.static(__dirname));
+
+let players = {};
+let bullets = [];
+let walls = {};
+let zoneRadius = 150;
+
+// Maps
+let maps = ["himalayas", "desert", "forest"];
+let activeMap = maps[Math.floor(Math.random() * maps.length)];
+
+// Walls
+let wallIdCounter = 0;
+
+// Character types
+let charTypes = [
+  { name: "fast", canBuild: false },
+  { name: "slow", canBuild: true }
+];
+
+// Bullet tick (same as before, shortened for clarity)
+setInterval(() => {
+  bullets.forEach((b, bi) => {
+    b.x += b.dx * 0.5;
+    b.z += b.dz * 0.5;
+
+    for (let id in players) {
+      if (id === b.owner) continue;
+      let p = players[id];
+      if (!p || p.health <= 0) continue;
+      let dx = p.x - b.x;
+      let dz = p.z - b.z;
+      if (Math.sqrt(dx * dx + dz * dz) < 1.5) {
+        p.health -= 20;
+        io.to(id).emit("hit", p.health);
+        if (p.health <= 0) {
+          setTimeout(() => {
+            let pos = { x: Math.random() * 100 - 50, y: 1, z: Math.random() * 100 - 50 };
+            p.x = pos.x;
+            p.y = pos.y;
+            p.z = pos.z;
+            p.health = 100;
+            io.to(id).emit("respawn", pos);
+          }, 3000);
+        }
+        bullets.splice(bi, 1);
+        break;
+      }
+    }
+  });
+}, 50);
+
+// Zone shrinking
+setInterval(() => {
+  if (zoneRadius > 20) zoneRadius -= 0.1;
+  io.emit("updateZone", zoneRadius);
+}, 100);
+
+// Connection
+io.on("connection", socket => {
+  console.log("Player connected:", socket.id);
+  let char = charTypes[Math.floor(Math.random() * charTypes.length)];
+  players[socket.id] = { x: 0, y: 1, z: 0, health: 100, weapon: "None", char };
+
+  socket.emit("loadMap", activeMap);
+  socket.emit("characterData", char);
+
+  socket.on("move", pos => {
+    if (players[socket.id]) {
+      players[socket.id].x = pos.x;
+      players[socket.id].y = pos.y;
+      players[socket.id].z = pos.z;
+    }
+    io.emit("updatePlayers", players);
+  });
+
+  socket.on("shoot", data => {
+    let p = players[socket.id];
+    if (!p || p.health <= 0) return;
+    let dir = data.direction;
+    let bullet = { x: p.x, y: p.y, z: p.z, dx: dir.x, dy: dir.y, dz: dir.z, owner: socket.id };
+    bullets.push(bullet);
+    io.emit("bulletFired", bullet);
+  });
+
+  socket.on("buildWall", pos => {
+    let p = players[socket.id];
+    if (!p || !p.char.canBuild) return;
+    let id = wallIdCounter++;
+    walls[id] = pos;
+    io.emit("updateWalls", walls);
+  });
+
+  socket.on("disconnect", () => {
+    delete players[socket.id];
+    io.emit("updatePlayers", players);
+  });
+});
+
+// Use the environment variable PORT for Render deployment
+const PORT = process.env.PORT || 3000;
+server.listen(PORT, () => console.log(`Running on port ${PORT}`));
